@@ -946,9 +946,10 @@ cv::Mat breath::gen_breath_trace(const cv::Mat &dx, const cv::Mat &dy)
 }
 
 */
-cv::Mat breath::gen_breath_trace(const cv::Mat &dx, const cv::Mat &dy)
+cv::Mat breath::gen_breath_trace(const cv::Mat &dx,
+                                 const cv::Mat &dy)
 {
-    /* ---------- 1. 缓存与预处理 ---------- */
+    /* ---------- 1. 原有缓存/预处理 ---------- */
     update_buf(dx, localtrace_shift_dx, param.motion_len, true, false);
     update_buf(dy, localtrace_shift_dy, param.motion_len, true, false);
 
@@ -963,41 +964,128 @@ cv::Mat breath::gen_breath_trace(const cv::Mat &dx, const cv::Mat &dy)
 
     cv::Mat signal_energy = calc_fft_max(localtrace_resp);
 
-    /* ---------- 2. 多区域投票 ---------- */
-    /* 清空本轮要写的一整列 */
+    /* ---------- 2. 滑动窗口投票（支持一个 box 多区域） ---------- */
+    /* 清空上一轮投票 */
+    /* ---- 1. 先把 slide_idx 这一列清零 ---- */
     for (int r = 0; r < 8; ++r) {
-        slide_sum[r] -= slide_buf[r][slide_idx];
-        slide_buf[r][slide_idx] = 0.f;
+        slide_sum[r] -= slide_buf[r][slide_idx];   // 减去旧值
+        slide_buf[r][slide_idx] = 0.f;             // 清零
     }
-    /* 每个 box 只往自己所属区域累加一次 */
+
+/* ---- 2. 每个 box 只往自己真正归属的区域累加 ---- */
     for (size_t i = 0; i < bbox_regions.size(); ++i) {
         float val = signal_energy.at<float>(i);
         for (int r : bbox_regions[i]) {
-            slide_buf[r][slide_idx] += val;
-            slide_sum[r] += val;
+            slide_buf[r][slide_idx] += val;   // 只往该区域槽位加一次
+            slide_sum[r] += val;              // 实时总和
         }
     }
     slide_idx = (slide_idx + 1) % SLIDE_LEN;
+    printf("[Vote] ");
+    for (int r = 0; r < 8; ++r)
+        printf("R%d=%.1f ", r, slide_sum[r]);
+    printf("\n");
+    /* ---------- 3. 实时柱状图（8 区域） ---------- */
+    {
+        float max_sum = *std::max_element(slide_sum, slide_sum + 8);
+        max_sum = std::max(max_sum, 1e-6f);
+        const int VOTE_H = 150, VOTE_W = 640;
 
-    /* ---------- 3. 1800 帧真人/假人判定 ---------- */
+        static cv::Mat vote_canvas;
+        if (vote_canvas.empty()) {
+            vote_canvas = cv::Mat(VOTE_H, VOTE_W, CV_8UC3, cv::Scalar(30, 30, 30));
+            cv::namedWindow("Vote-8Region", cv::WINDOW_AUTOSIZE);
+        }
+        vote_canvas.setTo(cv::Scalar(30, 30, 30));
+
+        int bar_w = VOTE_W / 8 - 10;
+        cv::Scalar bar_colors[8] = {
+                {0,200,255}, {0,255,0}, {255,0,0}, {0,0,255},
+                {255,255,0}, {255,0,255}, {0,255,255}, {128,128,128}
+        };
+        for (int i = 0; i < 8; ++i) {
+            int h = static_cast<int>((slide_sum[i] / max_sum) * (VOTE_H - 20));
+            cv::Rect r(i * (bar_w + 10) + 10, VOTE_H - h - 10, bar_w, h);
+            cv::rectangle(vote_canvas, r, bar_colors[i], -1);
+            cv::putText(vote_canvas, std::to_string(int(slide_sum[i])),
+                        cv::Point(r.x, VOTE_H - 5), cv::FONT_HERSHEY_PLAIN,
+                        1.0, {255,255,255}, 1);
+        }
+        best_region = std::max_element(slide_sum, slide_sum + 8) - slide_sum;
+        std::cout<<"best "<<best_region<<std::endl;
+        int x = best_region * (bar_w + 10) + 10;
+        cv::Rect hl(x - 2, VOTE_H - 2, bar_w + 4, 2);
+        cv::rectangle(vote_canvas, hl, {255,255,255}, -1);
+        cv::imshow("Vote-8Region", vote_canvas);
+    }
+
+    /* ---------- 4. 胸部 ROI 可视化（放大，只高亮 best_region） ---------- */
+    const int scale = 3;
+
+    cv::Mat visualization = cv::Mat::zeros(80 * scale,
+                                           80  * scale, CV_8UC3);
+
+    cv::Scalar colors[9] = {
+            {0,100,150}, {0,150,0}, {150,0,0}, {0,0,150},
+            {150,150,0}, {150,0,150}, {0,150,150}, {100,100,100}, {50,50,50}
+    };
+    cv::Scalar highlight_colors[8] = {
+            {0,200,255}, {0,255,0}, {255,0,0}, {0,0,255},
+            {255,255,0}, {255,0,255}, {0,255,255}, {128,128,128}
+    };
+
+    for (size_t i = 0; i < param.bbox.size(); ++i) {
+        cv::Rect scaled_box = param.bbox[i];
+        scaled_box.x *= scale; scaled_box.y *= scale;
+        scaled_box.width *= scale; scaled_box.height *= scale;
+
+        cv::Scalar color;
+        bool in_best = false;
+        for (int r : bbox_regions[i]) {
+            if (r == best_region) { in_best = true; break; }
+        }
+        if (in_best) {
+            color = highlight_colors[best_region];
+            cv::rectangle(visualization, scaled_box, color, -1);
+        } else {
+            int r = bbox_regions[i].empty() ? 8 : bbox_regions[i].front();
+            color = (r < 8 ? colors[r] : colors[8]);
+            cv::rectangle(visualization, scaled_box, color, 2);
+        }
+    }
+    cv::namedWindow("呼吸区域选择（放大）", cv::WINDOW_AUTOSIZE);
+    cv::imshow("呼吸区域选择（放大）", visualization);
+    cv::waitKey(1);
+
+    /* ---------- 5. 1800 帧真人/假人判定 ---------- */
     static int region_votes_900[8] = {0};
     static int frame_900 = 0;
-
-    best_region = std::max_element(slide_sum, slide_sum + 8) - slide_sum;
-
     region_votes_900[best_region]++;
-    if (++frame_900 >= 900) {
+    if (++frame_900 >= 1800) {
         int winner = std::max_element(region_votes_900, region_votes_900 + 8) - region_votes_900;
         float ratio = region_votes_900[winner] / 1800.0f;
-        printf("[1800-frame] 区域票数=[%d,%d,%d,%d,%d,%d,%d,%d] 最高占比=%.2f 结论=%s\n",
+        printf("[1800-frame] 区域票数 = [%d,%d,%d,%d,%d,%d,%d,%d]  最高占比 = %.2f  结论 = %s\n",
                region_votes_900[0], region_votes_900[1], region_votes_900[2], region_votes_900[3],
                region_votes_900[4], region_votes_900[5], region_votes_900[6], region_votes_900[7],
                ratio, ratio >= 0.7f ? "REAL" : "FAKE");
+
+        const int FLAG_W = 220, FLAG_H = 100;
+        static cv::Mat flag_canvas;
+        if (flag_canvas.empty()) {
+            flag_canvas = cv::Mat(FLAG_H, FLAG_W, CV_8UC3);
+            cv::namedWindow("1800-Frame Judge", cv::WINDOW_AUTOSIZE);
+        }
+        flag_canvas.setTo(ratio >= 0.7f ? cv::Scalar(0,255,0) : cv::Scalar(0,0,255));
+        cv::putText(flag_canvas, ratio >= 0.7f ? "REAL" : "FAKE",
+                    {20, FLAG_H - 25}, cv::FONT_HERSHEY_SIMPLEX, 1.5,
+                    {255,255,255}, 3);
+        cv::imshow("1800-Frame Judge", flag_canvas);
+
         memset(region_votes_900, 0, sizeof(region_votes_900));
         frame_900 = 0;
     }
 
-    /* ---------- 4. 构建呼吸信号（仅 best_region 的 box） ---------- */
+    /* ---------- 6. 构建呼吸信号（只选 best_region 的 box） ---------- */
     cv::Mat mask = cv::Mat::zeros(localtrace_resp.rows, 1, CV_32FC1);
     int box_count = 0;
     for (size_t i = 0; i < bbox_regions.size(); ++i) {
@@ -1029,7 +1117,6 @@ cv::Mat breath::gen_breath_trace(const cv::Mat &dx, const cv::Mat &dy)
     }
     return breath_trace;
 }
-
 float breath::gen_activity_trace(const cv::Mat &localdt) {
     // update activity traces
     update_buf(localdt, localtrace_acti, param.localtrace_acti_len, true, false);
@@ -1445,7 +1532,10 @@ void breath::gen_bbox(const int &frame_width, const int &frame_height, std::vect
 }
 
 */
-void breath::gen_bbox(const int &frame_width, const int &frame_height, std::vector <cv::Rect> &bbox) {
+void breath::gen_bbox(const int &frame_width,
+                      const int &frame_height,
+                      std::vector<cv::Rect>& bbox)
+{
     /* ========== 1. 原有滑动窗口生成逻辑（不变） ========== */
     std::vector<int> x_range{0, frame_width};
     std::vector<int> y_range{0, frame_height};
