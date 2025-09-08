@@ -1,4 +1,4 @@
-#include "run.h"
+#include "main.h"
 
 
 int main()
@@ -88,8 +88,8 @@ int main()
                                         rois.at(file_idx).y/1.1 + rois.at(file_idx).height,
                                         rois.at(file_idx).width , rois.at(file_idx).height );
                 cv::Point center = (rois.at(file_idx).tl() + rois.at(file_idx).br()) * 0.5;
-                int width = rois.at(file_idx).width * 3 ;
-                int height = rois.at(file_idx).height * 3;
+                int width = rois.at(file_idx).width * 4 ;
+                int height = rois.at(file_idx).height * 4;
                 int x = center.x - width / 2;
                 int y = center.y - height / 2;
 
