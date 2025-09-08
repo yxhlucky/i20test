@@ -2,6 +2,7 @@
 #include <opencv2/opencv.hpp>
 #include <iostream>
 #include <numeric>
+#include "utils.h"
 
 
 struct pulse_info

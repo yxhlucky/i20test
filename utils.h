@@ -27,5 +27,7 @@ cv::Rect resizeRect(cv::Rect src);
 
 void processImage(cv::Mat& im, cv::Mat& bgr, debayer& db, bin2mat& b2m);
 
+float calculateWeightedStd(const std::unordered_map<int, int> &peak_counts);
+
 
 #endif

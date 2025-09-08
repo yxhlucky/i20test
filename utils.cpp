@@ -104,3 +104,23 @@ void processImage(cv::Mat& im, cv::Mat& bgr, debayer& db, bin2mat& b2m)
     }
 }
 
+float calculateWeightedStd(const std::unordered_map<int, int> &peak_counts) {
+    if (peak_counts.empty()) return 0.0f;
+
+    float sum = 0, sum_sq = 0;
+    int total_count = 0;
+
+    for (const auto &peak : peak_counts) {
+        int value = peak.first;
+        int count = peak.second;
+        sum += value * count;
+        sum_sq += value * value * count;
+        total_count += count;
+    }
+
+    float mean = sum / total_count;
+    float variance = (sum_sq / total_count) - (mean * mean);
+
+    return std::sqrt(variance);
+}
+

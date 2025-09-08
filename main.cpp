@@ -5,9 +5,9 @@ int main()
 {
     //std::string folder = "/Users/yangxh/Data/i20_Data/ppg/";
     //std::string folder = "/Volumes/637data_expansion/yxh/i20/i20_data/ppg_bre/syy_ppg_bre/";
-    //std::string folder = "/Users/yangxh/Data/i20_Data/bre/";
+    std::string folder = "/Users/yangxh/Data/i20_Data/sean/";
     //std::string folder = "/Users/yangxh/Data/i20_Data/0617/wwj/";
-    std::string folder = "/Users/yangxh/Data/i20_Data/0618/yxh_20/";
+    //std::string folder = "/Users/yangxh/Data/i20_Data/0618/yxh_20/";
     //std::string folder = "/Users/yangxh/Data/i20_Data/lily_baby_0624/10min_1.1m/";
     //std::string folder = "/Users/yangxh/Data/i20_Data/0624/yxh_nir/";
     //开关  false 开启  true 关闭
@@ -103,7 +103,7 @@ int main()
                 pulse_info pi = pul.detect(face_bgr, cv::Rect(0, 0, face_bgr.cols, face_bgr.rows), false);
                 cv::Mat R_signal, G_signal, B_signal;
                 cv::Mat rgb_trace = cv::Mat::zeros(10 * FPS, 3, CV_32FC1);
-                breath_info bi = bre.detect(chestroi, cv::Rect(0, 0, chestroi.cols, chestroi.rows));
+                breath_info bi = bre.detect(chestroi);
                 /******平滑*********/
                 RRProcessor.addDataPoint(bi.breath_rates.back());
                 HRProcessor.addDataPoint(pi.heartrate);
