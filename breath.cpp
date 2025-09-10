@@ -946,10 +946,9 @@ cv::Mat breath::gen_breath_trace(const cv::Mat &dx, const cv::Mat &dy)
 }
 
 */
-cv::Mat breath::gen_breath_trace(const cv::Mat &dx,
-                                 const cv::Mat &dy)
-{
-    /* ---------- 1. 原有缓存/预处理 ---------- */
+cv::Mat breath::gen_breath_trace(const cv::Mat &dx, const cv::Mat &dy) {
+    vote_reset_counter++;
+
     update_buf(dx, localtrace_shift_dx, param.motion_len, true, false);
     update_buf(dy, localtrace_shift_dy, param.motion_len, true, false);
 
@@ -959,141 +958,161 @@ cv::Mat breath::gen_breath_trace(const cv::Mat &dx,
         update_buf(localtrace_shift, localtrace_resp, param.localtrace_resp_len, false, true);
     }
 
-    if (localtrace_resp.cols != param.localtrace_resp_len)
+    if (localtrace_resp.cols != param.localtrace_resp_len) {
         return cv::Mat();
+    }
 
     cv::Mat signal_energy = calc_fft_max(localtrace_resp);
 
-    /* ---------- 2. 滑动窗口投票（支持一个 box 多区域） ---------- */
-    /* 清空上一轮投票 */
-    /* ---- 1. 先把 slide_idx 这一列清零 ---- */
-    for (int r = 0; r < 8; ++r) {
-        slide_sum[r] -= slide_buf[r][slide_idx];   // 减去旧值
-        slide_buf[r][slide_idx] = 0.f;             // 清零
+    assert(best_region >= 0 && best_region < 4);
+    assert(slide_idx >= 0 && slide_idx < SLIDE_LEN);
+
+    /* ---------- 滑动窗口投票 ---------- */
+    for (int r = 0; r < 4; ++r) {
+        slide_sum[r] -= slide_buf[r][slide_idx];
     }
 
-/* ---- 2. 每个 box 只往自己真正归属的区域累加 ---- */
-    for (size_t i = 0; i < bbox_regions.size(); ++i) {
+    for (size_t i = 0; i < bbox_region.size(); ++i) {
+        int r = bbox_region[i];
+        if (r < 0 || r >= 4) continue;
+
         float val = signal_energy.at<float>(i);
-        for (int r : bbox_regions[i]) {
-            slide_buf[r][slide_idx] += val;   // 只往该区域槽位加一次
-            slide_sum[r] += val;              // 实时总和
-        }
+        slide_buf[r][slide_idx] = val;
+        slide_sum[r] += val;
     }
     slide_idx = (slide_idx + 1) % SLIDE_LEN;
-    printf("[Vote] ");
-    for (int r = 0; r < 8; ++r)
-        printf("R%d=%.1f ", r, slide_sum[r]);
-    printf("\n");
-    /* ---------- 3. 实时柱状图（8 区域） ---------- */
-    {
-        float max_sum = *std::max_element(slide_sum, slide_sum + 8);
-        max_sum = std::max(max_sum, 1e-6f);
-        const int VOTE_H = 150, VOTE_W = 640;
 
+    /* ---------- 实时投票柱状图（新增） ---------- */
+    {
+        // 1) 归一化到 0~1
+        float max_sum = *std::max_element(slide_sum, slide_sum + 4);
+        max_sum = std::max(max_sum, 1e-6f);
+        const int VOTE_H = 150;
+        const int VOTE_W = 400;
+
+        // 2) 画布：只在第一次创建
         static cv::Mat vote_canvas;
         if (vote_canvas.empty()) {
             vote_canvas = cv::Mat(VOTE_H, VOTE_W, CV_8UC3, cv::Scalar(30, 30, 30));
-            cv::namedWindow("Vote-8Region", cv::WINDOW_AUTOSIZE);
+            cv::namedWindow("Vote-4Region", cv::WINDOW_AUTOSIZE);
         }
         vote_canvas.setTo(cv::Scalar(30, 30, 30));
 
-        int bar_w = VOTE_W / 8 - 10;
-        cv::Scalar bar_colors[8] = {
-                {0,200,255}, {0,255,0}, {255,0,0}, {0,0,255},
-                {255,255,0}, {255,0,255}, {0,255,255}, {128,128,128}
+        // 3) 画柱子
+        int bar_w = VOTE_W / 4 - 10;
+        cv::Scalar bar_colors[4] = {
+                cv::Scalar(0, 200, 255),   // 0
+                cv::Scalar(0, 255, 0),     // 1
+                cv::Scalar(255, 0, 0),     // 2
+                cv::Scalar(0, 0, 255)      // 3
         };
-        for (int i = 0; i < 8; ++i) {
+        for (int i = 0; i < 4; ++i) {
             int h = static_cast<int>((slide_sum[i] / max_sum) * (VOTE_H - 20));
             cv::Rect r(i * (bar_w + 10) + 10, VOTE_H - h - 10, bar_w, h);
             cv::rectangle(vote_canvas, r, bar_colors[i], -1);
-            cv::putText(vote_canvas, std::to_string(int(slide_sum[i])),
-                        cv::Point(r.x, VOTE_H - 5), cv::FONT_HERSHEY_PLAIN,
-                        1.0, {255,255,255}, 1);
+
+            // 数值
+            cv::putText(vote_canvas,
+                        std::to_string(int(slide_sum[i])),
+                        cv::Point(r.x, VOTE_H - 5),
+                        cv::FONT_HERSHEY_PLAIN,
+                        1.0,
+                        cv::Scalar(255, 255, 255),
+                        1);
         }
-        best_region = std::max_element(slide_sum, slide_sum + 8) - slide_sum;
-        std::cout<<"best "<<best_region<<std::endl;
+
+        // 4) 高亮最佳区域
         int x = best_region * (bar_w + 10) + 10;
         cv::Rect hl(x - 2, VOTE_H - 2, bar_w + 4, 2);
-        cv::rectangle(vote_canvas, hl, {255,255,255}, -1);
-        cv::imshow("Vote-8Region", vote_canvas);
+        cv::rectangle(vote_canvas, hl, cv::Scalar(255, 255, 255), -1);
+
+        cv::imshow("Vote-4Region", vote_canvas);
     }
 
-    /* ---------- 4. 胸部 ROI 可视化（放大，只高亮 best_region） ---------- */
-    const int scale = 3;
+    /* ---------- 原有可视化（胸部 ROI） ---------- */
+    best_region = std::max_element(std::begin(slide_sum), std::end(slide_sum)) - std::begin(slide_sum);
 
-    cv::Mat visualization = cv::Mat::zeros(80 * scale,
-                                           80  * scale, CV_8UC3);
-
-    cv::Scalar colors[9] = {
-            {0,100,150}, {0,150,0}, {150,0,0}, {0,0,150},
-            {150,150,0}, {150,0,150}, {0,150,150}, {100,100,100}, {50,50,50}
+    cv::Mat visualization = cv::Mat::zeros(60,60, CV_8UC3);
+    cv::Scalar colors[5] = {
+            cv::Scalar(0, 100, 150),
+            cv::Scalar(0, 150, 0),
+            cv::Scalar(150, 0, 0),
+            cv::Scalar(0, 0, 150),
+            cv::Scalar(50, 50, 50)
     };
-    cv::Scalar highlight_colors[8] = {
-            {0,200,255}, {0,255,0}, {255,0,0}, {0,0,255},
-            {255,255,0}, {255,0,255}, {0,255,255}, {128,128,128}
+    cv::Scalar highlight_colors[4] = {
+            cv::Scalar(0, 200, 255),
+            cv::Scalar(0, 255, 0),
+            cv::Scalar(255, 0, 0),
+            cv::Scalar(0, 0, 255)
     };
 
     for (size_t i = 0; i < param.bbox.size(); ++i) {
-        cv::Rect scaled_box = param.bbox[i];
-        scaled_box.x *= scale; scaled_box.y *= scale;
-        scaled_box.width *= scale; scaled_box.height *= scale;
-
         cv::Scalar color;
-        bool in_best = false;
-        for (int r : bbox_regions[i]) {
-            if (r == best_region) { in_best = true; break; }
-        }
-        if (in_best) {
+        if (i < bbox_region.size() && bbox_region[i] == best_region) {
             color = highlight_colors[best_region];
-            cv::rectangle(visualization, scaled_box, color, -1);
+            cv::rectangle(visualization, param.bbox[i], color, -1);
+        } else if (i < bbox_region.size() && bbox_region[i] >= 0 && bbox_region[i] < 4) {
+            color = colors[bbox_region[i]];
+            cv::rectangle(visualization, param.bbox[i], color, 1);
         } else {
-            int r = bbox_regions[i].empty() ? 8 : bbox_regions[i].front();
-            color = (r < 8 ? colors[r] : colors[8]);
-            cv::rectangle(visualization, scaled_box, color, 2);
+            color = colors[4];
+            cv::rectangle(visualization, param.bbox[i], color, 1);
         }
     }
-    cv::namedWindow("呼吸区域选择（放大）", cv::WINDOW_AUTOSIZE);
-    cv::imshow("呼吸区域选择（放大）", visualization);
+    cv::imshow("呼吸区域选择", visualization);
     cv::waitKey(1);
 
-    /* ---------- 5. 1800 帧真人/假人判定 ---------- */
-    static int region_votes_900[8] = {0};
-    static int frame_900 = 0;
-    region_votes_900[best_region]++;
-    if (++frame_900 >= 1800) {
-        int winner = std::max_element(region_votes_900, region_votes_900 + 8) - region_votes_900;
-        float ratio = region_votes_900[winner] / 1800.0f;
-        printf("[1800-frame] 区域票数 = [%d,%d,%d,%d,%d,%d,%d,%d]  最高占比 = %.2f  结论 = %s\n",
-               region_votes_900[0], region_votes_900[1], region_votes_900[2], region_votes_900[3],
-               region_votes_900[4], region_votes_900[5], region_votes_900[6], region_votes_900[7],
-               ratio, ratio >= 0.7f ? "REAL" : "FAKE");
+    /* ---------- 后续逻辑保持不变 ---------- */
 
+    /* ---------- 900 帧真人/假人判定 ---------- */
+    static int region_votes_900[4] = {0};   // 900 帧内每个区域的当选次数
+    static int frame_900 = 0;               // 已处理帧计数
+
+    region_votes_900[best_region]++;        // 记录当前帧最佳区域
+    frame_900++;
+
+    static bool is_human = true;            // 上一周期结论，默认真人
+
+    if (frame_900 >= 1800) {                 // 每 900 帧（30 秒）判定一次
+        int winner = std::max_element(region_votes_900, region_votes_900+4) - region_votes_900;
+        int max_vote = region_votes_900[winner];
+        float ratio = (float)max_vote / 900.0f;
+
+        printf("[900-frame] 区域票数 = [%d, %d, %d, %d]  最高占比 = %.2f  "
+               "结论 = %s\n",
+               region_votes_900[0], region_votes_900[1],
+               region_votes_900[2], region_votes_900[3], ratio,
+               ratio >= 0.7f ? "REAL" : "FAKE");
+
+        /* 可视化判定结果 */
         const int FLAG_W = 220, FLAG_H = 100;
         static cv::Mat flag_canvas;
         if (flag_canvas.empty()) {
             flag_canvas = cv::Mat(FLAG_H, FLAG_W, CV_8UC3);
-            cv::namedWindow("1800-Frame Judge", cv::WINDOW_AUTOSIZE);
+            cv::namedWindow("900-Frame Judge", cv::WINDOW_AUTOSIZE);
         }
-        flag_canvas.setTo(ratio >= 0.7f ? cv::Scalar(0,255,0) : cv::Scalar(0,0,255));
-        cv::putText(flag_canvas, ratio >= 0.7f ? "REAL" : "FAKE",
-                    {20, FLAG_H - 25}, cv::FONT_HERSHEY_SIMPLEX, 1.5,
-                    {255,255,255}, 3);
-        cv::imshow("1800-Frame Judge", flag_canvas);
+        is_human = (ratio >= 0.7f);
+        flag_canvas.setTo(is_human ? cv::Scalar(0,255,0) : cv::Scalar(0,0,255));
+        cv::putText(flag_canvas, is_human ? "REAL" : "FAKE",
+                    cv::Point(20, FLAG_H-25), cv::FONT_HERSHEY_SIMPLEX,
+                    1.5, cv::Scalar(255,255,255), 3);
+        cv::imshow("900-Frame Judge", flag_canvas);
 
+        /* 清零准备下一轮 900 帧 */
         memset(region_votes_900, 0, sizeof(region_votes_900));
         frame_900 = 0;
     }
 
-    /* ---------- 6. 构建呼吸信号（只选 best_region 的 box） ---------- */
+    /* ---------- 若判定为假人，直接返回空信号 ---------- */
+
+
     cv::Mat mask = cv::Mat::zeros(localtrace_resp.rows, 1, CV_32FC1);
     int box_count = 0;
-    for (size_t i = 0; i < bbox_regions.size(); ++i) {
-        bool take = false;
-        for (int r : bbox_regions[i]) if (r == best_region) { take = true; break; }
-        if (take) {
+    for (size_t i = 0; i < bbox_region.size(); ++i) {
+        if (bbox_region[i] == best_region) {
             mask.at<float>(i, 0) = 1.0f;
-            ++box_count;
+            box_count++;
         }
     }
     if (box_count == 0) {
@@ -1102,13 +1121,15 @@ cv::Mat breath::gen_breath_trace(const cv::Mat &dx,
     }
 
     cv::Mat breath_trace = cv::Mat::zeros(1, localtrace_resp.cols, CV_32FC1);
-    for (int i = 0; i < localtrace_resp.rows; ++i)
-        if (mask.at<float>(i, 0) > 0)
+    for (int i = 0; i < localtrace_resp.rows; ++i) {
+        if (mask.at<float>(i, 0) > 0) {
             breath_trace += localtrace_resp.row(i) / box_count;
+        }
+    }
 
     cv::Scalar avg, stddev;
     cv::meanStdDev(breath_trace, avg, stddev);
-    breath_trace = (breath_trace - avg[0]) / (1.f + stddev[0]);
+    breath_trace = (breath_trace - avg[0]) / (1 + stddev[0]);
 
     if (breath_trace.cols > 1) {
         cv::hconcat(breath_trace.colRange(1, breath_trace.cols),
@@ -1117,6 +1138,7 @@ cv::Mat breath::gen_breath_trace(const cv::Mat &dx,
     }
     return breath_trace;
 }
+
 float breath::gen_activity_trace(const cv::Mat &localdt) {
     // update activity traces
     update_buf(localdt, localtrace_acti, param.localtrace_acti_len, true, false);
@@ -1309,8 +1331,6 @@ void breath::modify_breathshape(cv::Mat &trace) {
     cv::pow(shape, 0.5, shape);
     cv::multiply(trace, shape, trace);
 }
-//四区域
-/*
 
 void breath::gen_bbox(const int &frame_width, const int &frame_height, std::vector <cv::Rect> &bbox) {
     std::vector<int> x_range = std::vector < int > {0, frame_width};
@@ -1318,21 +1338,18 @@ void breath::gen_bbox(const int &frame_width, const int &frame_height, std::vect
 
     for (int i = 0; i < param.bbox_size.size(); i++) {
         for (int x = x_range.at(0);
-             x <= x_range.at(1) - param.bbox_size.at(i); x = x +
-                                                             floor(param.bbox_size.at(i) * param.bbox_step.at(i))) {
+             x <= x_range.at(1) - param.bbox_size.at(i); x = x + floor(param.bbox_size.at(i) * param.bbox_step.at(i))) {
             for (int y = y_range.at(0); y <= y_range.at(1) - param.bbox_size.at(i); y = y +
-                                                                                        floor(param.bbox_size.at(
-                                                                                                i) *
-                                                                                              param.bbox_step.at(
-                                                                                                      i))) {
+                                                                                        floor(param.bbox_size.at(i) *
+                                                                                              param.bbox_step.at(i))) {
                 bbox.push_back(cv::Rect(x, y, param.bbox_size.at(i), param.bbox_size.at(i)));
             }
         }
     }
+
     x_range.clear();
     y_range.clear();
-
-    // 计算九宫格划分的边界
+// 计算九宫格划分的边界
     float h_third = frame_height / 3.0f;
     float w_third = frame_width / 3.0f;
 
@@ -1400,219 +1417,6 @@ void breath::gen_bbox(const int &frame_width, const int &frame_height, std::vect
 
 }
 
-*/
-/*
-
-void breath::gen_bbox(const int &frame_width, const int &frame_height, std::vector <cv::Rect> &bbox) {
-    std::vector<int> x_range = std::vector < int > {0, frame_width};
-    std::vector<int> y_range = std::vector < int > {0, frame_height};
-
-    for (int i = 0; i < param.bbox_size.size(); i++) {
-        for (int x = x_range.at(0);
-             x <= x_range.at(1) - param.bbox_size.at(i); x = x +
-                                                             floor(param.bbox_size.at(i) * param.bbox_step.at(i))) {
-            for (int y = y_range.at(0); y <= y_range.at(1) - param.bbox_size.at(i); y = y +
-                                                                                        floor(param.bbox_size.at(
-                                                                                                i) *
-                                                                                              param.bbox_step.at(
-                                                                                                      i))) {
-                bbox.push_back(cv::Rect(x, y, param.bbox_size.at(i), param.bbox_size.at(i)));
-            }
-        }
-    }
-    x_range.clear();
-    y_range.clear();
-
-    // 计算九宫格划分的边界
-    float h_third = frame_height / 3.0f;
-    float w_third = frame_width / 3.0f;
-
-    // 为每个box分配区域
-    bbox_region.clear();
-    bbox_region.resize(bbox.size(), -1);
-
-    for (size_t i = 0; i < bbox.size(); i++) {
-        // 计算box中心点
-        float center_x = bbox[i].x + bbox[i].width / 2.0f;
-        float center_y = bbox[i].y + bbox[i].height / 2.0f;
-
-        // 分配区域 (九宫格中的八个区域，不包括中心区域)
-        if (center_y < h_third) {
-            if (center_x < w_third) {
-                bbox_region[i] = 0; // 左上区域
-            } else if (center_x >= 2 * w_third) {
-                bbox_region[i] = 2; // 右上区域
-            } else {
-                bbox_region[i] = 1; // 上方区域
-            }
-        } else if (center_y >= 2 * h_third) {
-            if (center_x < w_third) {
-                bbox_region[i] = 5; // 左下区域
-            } else if (center_x >= 2 * w_third) {
-                bbox_region[i] = 7; // 右下区域
-            } else {
-                bbox_region[i] = 6; // 下方区域
-            }
-        } else {
-            if (center_x < w_third) {
-                bbox_region[i] = 3; // 左侧区域
-            } else if (center_x >= 2 * w_third) {
-                bbox_region[i] = 4; // 右侧区域
-            } // 中心区域不分配
-        }
-    }
-
-    // 添加在函数末尾 - 打印区域分配结果
-    std::cout << "==== Box Region Assignment Results ====" << std::endl;
-    std::cout << "Total boxes: " << bbox.size() << std::endl;
-
-    // 区域计数器
-    int region_counts[9] = {0}; // 0-7为八个区域，8用于未分配区域(-1)
-
-    for (size_t i = 0; i < bbox.size(); i++) {
-        std::cout << "Box " << i << ": (" << bbox[i].x << ", " << bbox[i].y
-                  << ", " << bbox[i].width << ", " << bbox[i].height << ") ";
-
-        std::cout << "Center: (" << (bbox[i].x + bbox[i].width / 2.0f) << ", "
-                  << (bbox[i].y + bbox[i].height / 2.0f) << ") ";
-
-        switch (bbox_region[i]) {
-            case 0:
-                std::cout << "Region: TOP-LEFT" << std::endl;
-                region_counts[0]++;
-                break;
-            case 1:
-                std::cout << "Region: TOP-RIGHT" << std::endl;
-                region_counts[1]++;
-                break;
-            case 2:
-                std::cout << "Region: TOP" << std::endl;
-                region_counts[2]++;
-                break;
-            case 3:
-                std::cout << "Region: BOTTOM-LEFT" << std::endl;
-                region_counts[3]++;
-                break;
-            case 4:
-                std::cout << "Region: BOTTOM-RIGHT" << std::endl;
-                region_counts[4]++;
-                break;
-            case 5:
-                std::cout << "Region: BOTTOM" << std::endl;
-                region_counts[5]++;
-                break;
-            case 6:
-                std::cout << "Region: LEFT" << std::endl;
-                region_counts[6]++;
-                break;
-            case 7:
-                std::cout << "Region: RIGHT" << std::endl;
-                region_counts[7]++;
-                break;
-            default:
-                std::cout << "Region: UNASSIGNED" << std::endl;
-                region_counts[8]++;
-                break;
-        }
-    }
-
-    // 打印统计信息
-    std::cout << "\n==== Region Statistics ====" << std::endl;
-    std::cout << "TOP-LEFT region: " << region_counts[0] << " boxes" << std::endl;
-    std::cout << "TOP-RIGHT region: " << region_counts[1] << " boxes" << std::endl;
-    std::cout << "TOP region: " << region_counts[2] << " boxes" << std::endl;
-    std::cout << "BOTTOM-LEFT region: " << region_counts[3] << " boxes" << std::endl;
-    std::cout << "BOTTOM-RIGHT region: " << region_counts[4] << " boxes" << std::endl;
-    std::cout << "BOTTOM region: " << region_counts[5] << " boxes" << std::endl;
-    std::cout << "LEFT region: " << region_counts[6] << " boxes" << std::endl;
-    std::cout << "RIGHT region: " << region_counts[7] << " boxes" << std::endl;
-    std::cout << "UNASSIGNED: " << region_counts[8] << " boxes" << std::endl;
-    std::cout << "================================" << std::endl;
-
-}
-
-*/
-void breath::gen_bbox(const int &frame_width,
-                      const int &frame_height,
-                      std::vector<cv::Rect>& bbox)
-{
-    /* ========== 1. 原有滑动窗口生成逻辑（不变） ========== */
-    std::vector<int> x_range{0, frame_width};
-    std::vector<int> y_range{0, frame_height};
-
-    for (size_t i = 0; i < param.bbox_size.size(); ++i)
-    {
-        int bs  = param.bbox_size.at(i);
-        int st  = static_cast<int>(std::floor(bs * param.bbox_step.at(i)));
-        for (int y = y_range[0]; y <= y_range[1] - bs; y += st)
-            for (int x = x_range[0]; x <= x_range[1] - bs; x += st)
-                bbox.emplace_back(x, y, bs, bs);
-    }
-    x_range.clear();
-    y_range.clear();
-
-    /* ========== 2. 固定 8 个 40×40 区域（仅打印用） ========== */
-    const int win = 40;
-    const std::vector<cv::Rect> fixed8 = {
-            {0,   0,   win, win},   // 0
-            {20,  0,   win, win},   // 1
-            {40,  0,   win, win},   // 2
-            {0,   20,  win, win},   // 3
-            {40,  20,  win, win},   // 4
-            {0,   40,  win, win},   // 5
-            {20,  40,  win, win},   // 6
-            {40,  40,  win, win}    // 7
-    };
-
-    /* ========== 3. 手工映射：box 索引 → 所属区域列表 ========== */
-    /* 80×80 画面，20×20 步长 20 → 4×4 = 16 个 box */
-    /* ========== 3. 行优先 4×4 映射表 ========== */
-    const std::vector<std::vector<int>> box_regions = {
-            {0},             // 0  (0,0)
-            {0,1},           // 1  (0,20)
-            {1,2},           // 2  (0,40)
-            {2},             // 3  (0,60)
-            {0,3},           // 4  (20,0)
-            {0,1,3},         // 5  (20,20)
-            {1,2,4},         // 6  (20,40)
-            {2,4},           // 7  (20,60)
-            {3,5},           // 8  (40,0)
-            {3,5,6},         // 9  (40,20)
-            {4,6,7},         // 10 (40,40)
-            {4,7},           // 11 (40,60)
-            {5},             // 12 (60,0)
-            {5,6},           // 13 (60,20)
-            {6,7},           // 14 (60,40)
-            {7}              // 15 (60,60)
-    };
-
-    /* ========== 4. 计算每个 box 所属区域 ========== */
-    bbox_regions.resize(bbox.size());
-
-    for (size_t i = 0; i < bbox.size() && i < box_regions.size(); ++i)
-        bbox_regions[i] = box_regions[i];
-
-    /* ========== 5. 打印结果 ========== */
-    int region_counts[8] = {0};
-
-    std::cout << "==== Box Region Assignment Results ====" << std::endl;
-    std::cout << "Total boxes: " << bbox.size() << std::endl;
-
-    for (size_t i = 0; i < bbox.size(); ++i)
-    {
-        std::cout << "Box " << i << ": (" << bbox[i].x << "," << bbox[i].y
-                  << ") regions:";
-        for (int r : bbox_regions[i]) std::cout << " " << r;
-        std::cout << std::endl;
-
-        for (int r : bbox_regions[i]) ++region_counts[r];
-    }
-
-    std::cout << "\n==== Region Statistics ====" << std::endl;
-    for (int r = 0; r < 8; ++r)
-        std::cout << "Region " << r << ": " << region_counts[r] << " boxes" << std::endl;
-    std::cout << "================================" << std::endl;
-}
 cv::Mat breath::createA(const int &framelen, const float &lambda) {
     cv::Mat D = cv::Mat::zeros(framelen - 2, framelen, CV_32FC1);
 
