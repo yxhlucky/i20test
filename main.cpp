@@ -8,6 +8,7 @@ int main()
     std::string folder = "/Users/yangxh/Data/i20_Data/sean/";
     //std::string folder = "/Users/yangxh/Data/i20_Data/0617/wwj/";
     //std::string folder = "/Users/yangxh/Data/i20_Data/0618/yxh_20/";
+    //std::string folder = "/Users/yangxh/Data/i20_Data/0719/";
     //std::string folder = "/Users/yangxh/Data/i20_Data/lily_baby_0624/10min_1.1m/";
     //std::string folder = "/Users/yangxh/Data/i20_Data/0624/yxh_nir/";
     //开关  false 开启  true 关闭
@@ -75,7 +76,7 @@ int main()
 
             int HR = 0; float Qua = 0;
 
-            for (int frame_idx = 0; (frame_idx < b2m.frameCount) && (frame_idx <10000); frame_idx++)
+            for (int frame_idx = 0; (frame_idx < b2m.frameCount) && (frame_idx <4600); frame_idx++)
             {
 
                 im = b2m.get_mat();
@@ -94,12 +95,26 @@ int main()
                 int y = center.y - height / 2;
 
                 cv::Rect chest_roi(x, y, width, height);
-                chest_roi = chest_roi & cv::Rect(0, 0, bgr.cols, bgr.rows);
-                chestroi = bgr(chest_roi);
 
-                //单选胸框解除
-                //chestroi = bgr(rois_chest.at(file_idx));
-                cv::resize(chestroi, chestroi, dst_size, cv::INTER_AREA);
+                // ---------- 2. 计算需要填充的边界 ----------
+                int pad_left   = std::max(0, -chest_roi.x);
+                int pad_top    = std::max(0, -chest_roi.y);
+                int pad_right  = std::max(0, chest_roi.br().x - bgr.cols);
+                int pad_bottom = std::max(0, chest_roi.br().y - bgr.rows);
+                cv::Mat bgr_padded;
+                cv::copyMakeBorder(bgr, bgr_padded,
+                                   pad_top, pad_bottom, pad_left, pad_right,
+                                   cv::BORDER_REPLICATE);   // 也可用 BORDER_REFLECT_101
+
+                cv::Rect chest_roi_padded = chest_roi + cv::Point(pad_left, pad_top);
+                cv::resize(bgr_padded(chest_roi_padded), chestroi, dst_size, 0, 0, cv::INTER_AREA);
+
+//                chest_roi = chest_roi & cv::Rect(0, 0, bgr.cols, bgr.rows);
+//                chestroi = bgr(chest_roi);
+//
+//                //单选胸框解除
+//                //chestroi = bgr(rois_chest.at(file_idx));
+//                cv::resize(chestroi, chestroi, dst_size, cv::INTER_AREA);
                 pulse_info pi = pul.detect(face_bgr, cv::Rect(0, 0, face_bgr.cols, face_bgr.rows), false);
                 cv::Mat R_signal, G_signal, B_signal;
                 cv::Mat rgb_trace = cv::Mat::zeros(10 * FPS, 3, CV_32FC1);
