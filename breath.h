@@ -3,7 +3,6 @@
 #include <opencv2/opencv.hpp>
 #include <iostream>
 #include <numeric>
-
 #include "utils.h"
 
 constexpr float INV_255 = 1.0f / 255.0f;
@@ -30,7 +29,7 @@ struct breath_param {
 //    std::vector<int> bbox_size = std::vector<int>{  8, 12,32 };
 //    std::vector<int> bbox_size = std::vector<int>{  8, 12,32 };
 //    std::vector<float> bbox_step = std::vector<float>{  1, 0.5,0.5 };
-    std::vector<int> bbox_size = std::vector<int>{20};
+    std::vector<int> bbox_size = std::vector<int>{8};
     std::vector<float> bbox_step = std::vector<float>{1};
 
     float data[3] = {0.5, 0.0, -0.5};
@@ -65,6 +64,7 @@ struct breath_param {
     int breathrate_len;
 
     std::vector <cv::Rect> bbox;
+
 };
 
 
@@ -82,16 +82,7 @@ public:
 
     void reset();
 
-    int best_region;
-
-    std::vector<std::vector<int>> bbox_regions;
-
-    int region_code;
-
-    float ratio;
-
     std::vector <cv::Rect> bbox_select;
-
 private:
     void gen_bbox(const int &frame_width, const int &frame_height, std::vector <cv::Rect> &bbox);
 
@@ -110,7 +101,7 @@ private:
 
     void gen_global_breath(const cv::Mat &trace, cv::Mat &breath);
 
-    void    detrend(cv::Mat& trace, const cv::Mat A);
+    void detrend(cv::Mat &trace, const cv::Mat& A);
 
     cv::Mat createA(const int &N, const float &lambda);
 
@@ -160,21 +151,6 @@ private:
     std::vector<float> breath_rates;
     std::vector<float> activity_signal;
 
-    /************/
-    std::vector<int> bbox_region;
-    std::vector<float> region_votes;
 
-    int vote_reset_counter;
-    int vote_reset_interval;
-    static constexpr int SLIDE_LEN = 225;
-    //float slide_sum[4]   = {0};          // 当前窗口内总和
-    float slide_sum[8]   = {0};          // 当前窗口内总和
-    //float slide_buf[4][SLIDE_LEN] = {0}; // 环形缓冲
-    float slide_buf[8][SLIDE_LEN] = {0}; // 环形缓冲
-    int   slide_idx = 0;                 // 写指针
-
-    //int region_votes_900[4] = {0};
-    int region_votes_900[8] = {0};
-    int frame_900 = 0;
 //	int chest_flag;
 };

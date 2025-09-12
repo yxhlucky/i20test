@@ -30,7 +30,7 @@ debayer db(raw_format::RGGB);
 RectangleDrawer rd;
 int FPS = 30;
 int signal_len = FPS * 10;
-cv::Size dst_size(80, 80);
+cv::Size dst_size(96, 54);
 int bpm_value = 0;
 int ppg_bpm_value = 0;
 class DataProcessor {
