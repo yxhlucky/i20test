@@ -1,0 +1,3 @@
+/Users/yangxh/code/i20/i20test/cmake-build-debug/CMakeFiles/i20test.dir
+/Users/yangxh/code/i20/i20test/cmake-build-debug/CMakeFiles/edit_cache.dir
+/Users/yangxh/code/i20/i20test/cmake-build-debug/CMakeFiles/rebuild_cache.dir
