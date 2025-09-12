@@ -1,219 +1,120 @@
 #include "main.h"
-cv::Mat rotateImage(const cv::Mat& src, double angle)
-{
-    cv::Point2f center(src.cols / 2.0, src.rows / 2.0);
-    cv::Mat rotation_matrix = cv::getRotationMatrix2D(center, angle, 1.0);
-    cv::Mat rotated_image;
-    cv::warpAffine(src, rotated_image, rotation_matrix, src.size(), cv::INTER_LINEAR);
-    return rotated_image;
-}
+#include <unordered_map>
 
-// 输入：旋转图里的 Rect + 旋转角度 + 原图尺寸
-// 返回：原图坐标系的 Rect
-cv::Rect mapBackToOriginal(const cv::Rect& rRot, double angle, const cv::Size& origSize)
+std::unordered_map<int, cv::Rect> loadFrameROIs(const std::string& csvPath) {
+    std::unordered_map<int, cv::Rect> frameROIs;
+    std::ifstream file(csvPath);
+    std::string line;
+    int lineNo = 0;                                     // ← 行号计数
 
-{
-    // 1. 构造与 rotateImage() 里完全一样的矩阵
-    cv::Point2f c(origSize.width * 0.5f, origSize.height * 0.5f);
-    cv::Mat M = cv::getRotationMatrix2D(c, angle, 1.0);   // 正变换
+    while (std::getline(file, line)) {
+        ++lineNo;
+        if (line.empty()) continue;                     // 跳过空行
+        std::stringstream ss(line);
+        std::string cell;
+        std::vector<int> values;
+        try {                                           // ← 异常保护
+            while (std::getline(ss, cell, ',')) {
+                values.push_back(std::stoi(cell));      // 可能抛异常
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[ROI] stoi failed at line " << lineNo
+                      << " content: \"" << line << "\"  (" << e.what() << ")\n";
+            continue;                                   // 跳过本行
+        }
 
-    // 2. 求逆矩阵（用于把坐标映射回去）
-    cv::Mat M_inv; cv::invertAffineTransform(M, M_inv);
-
-    // 3. 旋转图里矩形的 4 个角
-    std::vector<cv::Point2f> corners = {
-            {static_cast<float>(rRot.x),                    static_cast<float>(rRot.y)},
-            {static_cast<float>(rRot.x + rRot.width),       static_cast<float>(rRot.y)},
-            {static_cast<float>(rRot.x + rRot.width),       static_cast<float>(rRot.y + rRot.height)},
-            {static_cast<float>(rRot.x),                    static_cast<float>(rRot.y + rRot.height)}
-    };
-
-    // 4. 逆变换回原图坐标
-    std::vector<cv::Point2f> origCorners(4);
-    cv::transform(corners, origCorners, M_inv);
-
-    // 5. 取包围盒
-    return cv::boundingRect(origCorners);
-}
-cv::Rect adjust_rect(const cv::Rect &currentRect, const cv::Rect &detectedFaceRect, const cv::Size &boundarySize) {
-    // 计算当前矩形和检测到的人脸矩形的中心点
-    cv::Point currentCenter = (currentRect.br() + currentRect.tl()) * 0.5;
-    cv::Point detectedCenter = (detectedFaceRect.br() + detectedFaceRect.tl()) * 0.5;
-
-    // 确定更新阈值（例如，当前矩形大小的10%）
-    int thresholdX = currentRect.width * 0.1;
-    int thresholdY = currentRect.height * 0.1;
-
-    // 检查是否需要更新位置或大小
-    if (std::abs(currentCenter.x - detectedCenter.x) > thresholdX ||
-        std::abs(currentCenter.y - detectedCenter.y) > thresholdY ||
-        std::abs(currentRect.width - detectedFaceRect.width) > thresholdX ||
-        std::abs(currentRect.height - detectedFaceRect.height) > thresholdY ||
-        currentRect.empty()) {
-        // 扩大当前矩形的尺寸
-        int newWidth = static_cast<int>(detectedFaceRect.width * 1);
-        int newHeight = static_cast<int>(detectedFaceRect.height * 1);
-
-        // 根据新的尺寸计算调整后的矩形位置
-        int x = detectedCenter.x - newWidth / 2;
-        int y = detectedCenter.y - newHeight / 2;
-
-        // 确保新的宽度和高度为偶数
-        if (newWidth % 2 != 0) newWidth -= 1;
-        if (newHeight % 2 != 0) newHeight -= 1;
-
-        // 确保x和y为偶数
-        if (x % 2 != 0) x -= 1;
-        if (y % 2 != 0) y -= 1;
-
-        // 创建新的矩形框，并确保其在图像边界内
-        cv::Rect dst_rect = cv::Rect(x, y, newWidth, newHeight);
-        cv::Rect boundaryRect = cv::Rect(0, 0, boundarySize.width, boundarySize.height);
-
-        // 确保新的矩形框大部分在边界内
-        if ((dst_rect & boundaryRect).area() > 0.2 * dst_rect.area())
-            return dst_rect & boundaryRect;
-        else
-            return cv::Rect(0, 0, 0, 0);
+        if (values.size() >= 5) {
+            frameROIs[values[0]] = cv::Rect(values[1], values[2], values[3], values[4]);
+        }
     }
-
-    // 否则返回当前矩形
-    return currentRect;
+    std::cout << "[ROI] loaded " << frameROIs.size() << " entries.\n";
+    return frameROIs;
 }
-
-
+int globalFrame = 0;          // ← 新增
 int main()
 {
     //std::string folder = "/Users/yangxh/Data/i20_Data/ppg/";
     //std::string folder = "/Volumes/637data_expansion/yxh/i20/i20_data/ppg_bre/syy_ppg_bre/";
-     std::string folder = "/Users/yangxh/Data/i20_Data/sean/";
+    std::string folder = "/Users/yangxh/Data/i20_Data/sean/";
     //std::string folder = "/Users/yangxh/Data/i20_Data/0617/wwj/";
-   // std::string folder = "/Users/yangxh/Data/i20_Data/0618/yxh_20/";
-    //std::string folder = "/Users/yangxh/Data/i20_Data/lily_baby_0624/10min_1.1m/";
-    //std::string folder = "/Users/yangxh/Data/i20_Data/0624/yxh_nir/";
     //std::string folder = "/Users/yangxh/Data/i20_Data/0618/yxh_20/";
     //std::string folder = "/Users/yangxh/Data/i20_Data/0719/";
-
-    int start_frame = 0;
-    cv::Rect lastFaceBox;   // 上一次有效的人脸框
-    cv::Rect currentFaceBox;  // 当前帧的人脸框
+    //std::string folder = "/Users/yangxh/Data/i20_Data/lily_baby_0624/10min_1.1m/";
+    //std::string folder = "/Users/yangxh/Data/i20_Data/0624/yxh_nir/";
+    //开关  false 开启  true 关闭
+    bool loadFromFile = false;
     //bool loadFromFile = true;
     std::string format = ".bin";
     // cv::Mat storageMat = cv::Mat::zeros(4500, 1, CV_32F);
     cv::Mat storageMat = cv::Mat::zeros(1, 300, CV_32F);
     //HRV_info HRVi;
     GetAllFormatFiles(folder, files, format);
+
+    std::unordered_map<int, cv::Rect> frameROIs = loadFrameROIs(folder + "2025-07-17-22-13-10_sean_1.csv");
     std::ofstream csv_file(folder + "ppg.csv");
     std::ofstream csv_file_ppgval(folder + "ppg_val.csv");
     std::ofstream csv_file_bre(folder + "bre.csv");
     std::ofstream csv_file_breval(folder + "bre_val.csv");
-    std::ofstream csv_face(folder + "face_box.csv");
-    csv_face << "frame,face_x,face_y,face_w,face_h\n";   // 写表头
+    int start_frame = 0;
     DataProcessor
             HRProcessor(FPS * 5);
     DataProcessor
             RRProcessor(FPS * 5);
 
-    std::string roiFilename = "../rois.csv";
-    std::string roi_chest_Filename = "../rois_chest.csv";
-    std::string model_path = "/Users/yangxh/code/i20/i20test/face_detection_yunet_2023mar.onnx";
-    YuNet face_detector(model_path); // 创建 YuNet 人脸检测对象
-
     for (int file_idx = 0; file_idx < files.size(); file_idx++)
     {
         bin2mat b2m(files.at(file_idx));
-
         b2m.set_frame(start_frame);
         csv_file << files.at(file_idx);
         csv_file_ppgval << files.at(file_idx);
         csv_file_bre << files.at(file_idx);
         csv_file_breval << files.at(file_idx);
-        cv::Mat im = b2m.get_mat();
-        cv::Mat bgr;
-        std::cout<<"图像尺寸"<<im.size()<<std::endl;
-        processImage(im, bgr, db, b2m);
         pulse pul(dst_size, FPS);
         breath bre(dst_size, FPS);
 
-        int HR = 0; float Qua = 0;
-
-        for (int frame_idx = start_frame; (frame_idx < b2m.frameCount) && (frame_idx <10000); frame_idx++)
+        for (int frame_idx = 0; (frame_idx < b2m.frameCount) && (frame_idx <40000); frame_idx++)
         {
-            im = b2m.get_mat();
+
+            auto it = frameROIs.find(start_frame+globalFrame++);
+            //auto it = frameROIs.find(globalFrame++);
+            if (it == frameROIs.end()) continue;          // 无此帧 ROI 则跳过
+            const cv::Rect& faceROI = it->second;
+
+            cv::Mat im = b2m.get_mat();
+            cv::Mat bgr;
             processImage(im, bgr, db, b2m);
-            if (frame_idx % 10 == 0) {
-                bool face_detected = false;
-                for (int angle = 0; angle < 360; angle += 45) {
-                    cv::Mat rotated_im = rotateImage(im, angle);
-                    face_detector.setInputSize(rotated_im.size());
-                    auto faces = face_detector.infer(rotated_im);
-
-                    if (!faces.empty()) {
-
-                        auto face_boxes = getFaceBoxes(faces);
-                        if (!face_boxes.empty()) {
-                            cv::Rect rotatedFaceBox = face_boxes[0];
-                            currentFaceBox = mapBackToOriginal(rotatedFaceBox, angle, im.size());
-
-                            face_detected = true;
-                            break;
-                        }
-                    }
-                }
-
-                if (!face_detected) {
-                    std::cerr << "No faces detected in frame " << frame_idx + 1 << ". Skipping this frame." << std::endl;
-                    currentFaceBox = lastFaceBox;
-                }
-            } else {
-                // 非检测帧，使用上次检测的框
-                currentFaceBox = lastFaceBox;
-            }
-
-
-            if (currentFaceBox.empty())
-            {
-                currentFaceBox = lastFaceBox;
-            }
-            currentFaceBox = adjust_rect(lastFaceBox, currentFaceBox, im.size());
-            csv_face << frame_idx << ','
-                     << currentFaceBox.x << ','
-                     << currentFaceBox.y << ','
-                     << currentFaceBox.width << ','
-                     << currentFaceBox.height << '\n';
-           // cv::rectangle(im, currentFaceBox, cv::Scalar(0, 255, 0) );
-            imshow("bgr",im);
-            lastFaceBox = currentFaceBox;
-
-            cv::Mat face_bgr = bgr(currentFaceBox);
+            /* 人脸区域 */
+            cv::Mat face_bgr = bgr(faceROI);
             cv::resize(face_bgr, face_bgr, dst_size, cv::INTER_AREA);
+
             cv::Mat chestroi;
-            cv::Point center = (currentFaceBox.tl() + currentFaceBox.br()) * 0.5;
-            int width = currentFaceBox.width * 4 ;
-            int height = currentFaceBox.height * 4;
-            int x = center.x - width / 2;
-            int y = center.y - height / 2;
+            cv::Point center = (faceROI.tl() + faceROI.br()) * 0.5;
+            int  width = faceROI.width  * 4;
+            int  height = faceROI.height * 4;
+            int  x = center.x - width / 2;
+            int  y = center.y - height / 2;
 
             cv::Rect chest_roi(x, y, width, height);
-//            chest_roi = chest_roi & cv::Rect(0, 0, bgr.cols, bgr.rows);
-//            chestroi = bgr(chest_roi);
-//
-//            //单选胸框解除
-//            //chestroi = bgr(rois_chest.at(file_idx));
-//            cv::resize(chestroi, chestroi, dst_size, cv::INTER_AREA);
+
             // ---------- 2. 计算需要填充的边界 ----------
-            int pad_left   = std::max(0, -chest_roi.x);
-            int pad_top    = std::max(0, -chest_roi.y);
-            int pad_right  = std::max(0, chest_roi.br().x - bgr.cols);
-            int pad_bottom = std::max(0, chest_roi.br().y - bgr.rows);
-            cv::Mat bgr_padded;
-            cv::copyMakeBorder(bgr, bgr_padded,
-                               pad_top, pad_bottom, pad_left, pad_right,
-                               cv::BORDER_REPLICATE);   // 也可用 BORDER_REFLECT_101
+//                int pad_left   = std::max(0, -chest_roi.x);
+//                int pad_top    = std::max(0, -chest_roi.y);
+//                int pad_right  = std::max(0, chest_roi.br().x - bgr.cols);
+//                int pad_bottom = std::max(0, chest_roi.br().y - bgr.rows);
+//                cv::Mat bgr_padded;
+//                cv::copyMakeBorder(bgr, bgr_padded,
+//                                   pad_top, pad_bottom, pad_left, pad_right,
+//                                   cv::BORDER_REPLICATE);   // 也可用 BORDER_REFLECT_101
+//
+//                cv::Rect chest_roi_padded = chest_roi + cv::Point(pad_left, pad_top);
+//                cv::resize(bgr_padded(chest_roi_padded), chestroi, dst_size, 0, 0, cv::INTER_AREA);
 
-            cv::Rect chest_roi_padded = chest_roi + cv::Point(pad_left, pad_top);
-            cv::resize(bgr_padded(chest_roi_padded), chestroi, dst_size, 0, 0, cv::INTER_AREA);
-
+            chest_roi = chest_roi & cv::Rect(0, 0, bgr.cols, bgr.rows);
+            chestroi = bgr(chest_roi);
+//
+//                //单选胸框解除
+//                //chestroi = bgr(rois_chest.at(file_idx));
+            cv::resize(chestroi, chestroi, dst_size, cv::INTER_AREA);
             pulse_info pi = pul.detect(face_bgr, cv::Rect(0, 0, face_bgr.cols, face_bgr.rows), false);
             cv::Mat R_signal, G_signal, B_signal;
             cv::Mat rgb_trace = cv::Mat::zeros(10 * FPS, 3, CV_32FC1);
@@ -237,6 +138,33 @@ int main()
             cv::imshow("PPG Signal", ppgPlot);
             cv::Mat brePlot = drawSignalPlot(bi.breath_signal,bpm_value,1200,200,300);
             cv::imshow("BRE Signal", brePlot);
+
+
+            // 使用
+//                cv::Mat ppg_mat(150, 1, CV_32F);
+//                if(!pi.ppg_signal.empty()){
+//                    update_signal_trace_cols(pi.ppg_signal.back(), storageMat, storageMat.cols);
+//
+//                }
+
+//                if (storageMat.cols >= WIN_LEN_HRV * FPS) {
+//                    if (frameCount_HRV % (FPS * 60) == 0) {
+//                        std::cout<<"12321"<<std::endl;
+//                        int length = (int) storageMat.cols;
+//                        cv::Mat trace = storageMat.row(1).colRange(length - WIN_LEN_HRV * FPS,
+//                                                                 length).clone();
+//                        HRVi = HRV_processor.getHRV(trace);
+//                    }
+//                    frameCount_HRV++;
+//                    frameCount_HRV == (FPS * 60) ? frameCount_HRV = 0 : frameCount_HRV;
+//                }
+
+//                std::cout << "PPG Signal Mat: [";
+//                for (int i = 0; i < storageMat.rows; i++) {
+//                    std::cout << storageMat.at<float>(i, 0);
+//                    if (i < storageMat.rows - 1) std::cout << ", ";
+//                }
+//                std::cout << "]" << std::endl;
 
 
 
@@ -287,11 +215,12 @@ int main()
         csv_file_breval << "\n";
 
     }
+
     csv_file.close();
     csv_file_ppgval.close();
     csv_file_bre.close();
     csv_file_breval.close();
-    csv_face.close();
+
 
     return 0;
 }
